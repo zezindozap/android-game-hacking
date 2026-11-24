@@ -1,0 +1,281 @@
+#!/usr/bin/env python3
+"""dops — droid arsenal CLI: recon, backup, memory, saves, IAP, LSPosed, MITM, evidence."""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from lib import backup, doctor, evidence, hook, iap, il2cpp, lsposed, mem, mitm, recon, recipe, save, util  # noqa: E402
+
+
+def cfg_for(pkg: str) -> dict:
+    for cand in (pkg, pkg.replace(".", "-"), pkg.split(".")[-1].lower()):
+        try:
+            return util.target(cand)
+        except util.DopsError:
+            continue
+    return {"package": pkg}
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(prog="dops", description="Android app hacking toolkit (minimal device interference)")
+    ap.add_argument("--json", action="store_true", help="machine-readable output")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("doctor", help="environment/device readiness")
+
+    p = sub.add_parser("recon", help="package recon")
+    p.add_argument("pkg")
+
+    p = sub.add_parser("backup", help="backup app internal+external data")
+    p.add_argument("pkg")
+    p.add_argument("--name")
+
+    p = sub.add_parser("restore", help="restore a backup archive")
+    p.add_argument("pkg")
+    p.add_argument("archive", type=Path)
+
+    p = sub.add_parser("backups", help="list backups")
+    p.add_argument("pkg", nargs="?")
+
+    p = sub.add_parser("mem", help="memory scan/edit (agm passthrough)")
+    p.add_argument("args", nargs=argparse.REMAINDER)
+
+    p = sub.add_parser("iap", help="FKIAB billing emulation")
+    isub = p.add_subparsers(dest="iap_cmd", required=True)
+    for name in ("status", "scope", "receipts", "script"):
+        s = isub.add_parser(name)
+        s.add_argument("pkg")
+        if name == "scope":
+            s.add_argument("--remove", action="store_true")
+        if name == "receipts":
+            s.add_argument("--clean", action="store_true")
+            s.add_argument("--clone")
+            s.add_argument("--count", type=int, default=1)
+        if name == "script":
+            s.add_argument("--loader", type=Path)
+            s.add_argument("--payload", type=Path)
+            s.add_argument("--remove", action="store_true")
+
+    p = sub.add_parser("lsposed", help="LSPosed control via lspctl")
+    lsub = p.add_subparsers(dest="ls_cmd", required=True)
+    lsub.add_parser("status")
+    lsub.add_parser("modules")
+    s = lsub.add_parser("scope")
+    s.add_argument("module")
+    s.add_argument("pkg")
+    s.add_argument("--remove", action="store_true")
+    s = lsub.add_parser("scope-db")
+    s.add_argument("module")
+    s.add_argument("pkg")
+    s.add_argument("--remove", action="store_true")
+    s.add_argument("--reboot", action="store_true")
+
+    p = sub.add_parser("mitm", help="TLS interception for one app/host")
+    msub = p.add_subparsers(dest="mitm_cmd", required=True)
+    s = msub.add_parser("enable")
+    s.add_argument("pkg")
+    s.add_argument("--host")
+    s.add_argument("--port", type=int, default=8080)
+    s.add_argument("--dry-run", action="store_true")
+    msub.add_parser("disable")
+    s = msub.add_parser("ca")
+    s.add_argument("--install", action="store_true")
+    s.add_argument("--system", action="store_true")
+    s.add_argument("--unmount", action="store_true")
+
+    p = sub.add_parser("save", help="save file sniffing")
+    ssub = p.add_subparsers(dest="save_cmd", required=True)
+    s = ssub.add_parser("sniff")
+    s.add_argument("path", type=Path)
+
+    p = sub.add_parser("il2cpp", help="dump IL2CPP metadata/libs")
+    isub = p.add_subparsers(dest="il_cmd", required=True)
+    s = isub.add_parser("dump")
+    s.add_argument("pkg")
+    s.add_argument("--apks", help="lista de APKs locais (vírgula) para pular o pull")
+    s.add_argument("--force-pull", action="store_true")
+
+    p = sub.add_parser("evidence", help="logcat+screenshot+files bundle")
+    p.add_argument("pkg")
+    p.add_argument("--seconds", type=int, default=0)
+    p.add_argument("--tag", default="")
+
+    p = sub.add_parser("hook", help="run a Frida script")
+    hsub = p.add_subparsers(dest="hook_cmd", required=True)
+    s = hsub.add_parser("run")
+    s.add_argument("script", type=Path)
+    s.add_argument("pkg")
+    s.add_argument("--spawn", action="store_true")
+    s.add_argument("--seconds", type=int, default=0)
+    s.add_argument("--host")
+
+    p = sub.add_parser("recipe", help="declarative recipes")
+    rsub = p.add_subparsers(dest="rec_cmd", required=True)
+    rsub.add_parser("list")
+    s = rsub.add_parser("run")
+    s.add_argument("name")
+    s.add_argument("--target")
+    s.add_argument("--dry-run", action="store_true")
+
+    sub.add_parser("cleanup", help="stop mitm/frida and restore SELinux")
+    sub.add_parser("version", help="toolkit version (git describe)")
+
+    a = ap.parse_args()
+
+    if a.cmd == "doctor":
+        info = doctor.collect()
+        print(json.dumps(info, indent=1) if a.json else doctor.render(info))
+        return 0
+
+    if a.cmd == "recon":
+        cfg = cfg_for(a.pkg)
+        pkg = cfg.get("package", a.pkg)
+        info = recon.recon(pkg, cfg)
+        print(json.dumps(info, indent=1) if a.json else recon.render(info))
+        return 0
+
+    if a.cmd == "backup":
+        cfg = cfg_for(a.pkg)
+        pkg = cfg.get("package", a.pkg)
+        dest = backup.backup(pkg, cfg, a.name)
+        print(dest)
+        return 0
+
+    if a.cmd == "restore":
+        backup.restore(cfg_for(a.pkg).get("package", a.pkg), a.archive)
+        print("restored", a.archive)
+        return 0
+
+    if a.cmd == "backups":
+        print("\n".join(backup.list_backups(a.pkg)) or "none")
+        return 0
+
+    if a.cmd == "mem":
+        return mem.agm(a.args)
+
+    if a.cmd == "iap":
+        cfg = cfg_for(a.pkg)
+        pkg = cfg.get("package", a.pkg)
+        if a.iap_cmd == "status":
+            st = iap.status(pkg)
+            scope_txt = st["scope"] if "scope_error" not in st else f"(indisponível: {st['scope_error'].splitlines()[0]})"
+            print(json.dumps(st, indent=1) if a.json else
+                  f"installed={st['installed']} uid={st.get('uid')} injected={st['injected']} "
+                  f"scope={scope_txt} scripts={st['scripts']} receipts={len(st['receipts'])}")
+            for r in st["receipts"]:
+                print("  ", r["productId"], r["orderId"])
+            return 0
+        if a.iap_cmd == "scope":
+            print(iap.scope_remove(pkg) if a.remove else iap.scope_add(pkg))
+            return 0
+        if a.iap_cmd == "receipts":
+            if a.clean:
+                iap.clean_receipts(pkg, cfg)
+                print("cleaned")
+                return 0
+            if a.clone:
+                print(iap.clone_receipts(pkg, cfg, a.clone, a.count))
+                return 0
+            for r in iap.receipts(pkg, cfg):
+                print(r["productId"], r["orderId"], r["purchaseTime"])
+            return 0
+        if a.iap_cmd == "script":
+            if a.remove:
+                print(iap.remove_script(pkg))
+            else:
+                if not a.loader:
+                    raise util.DopsError("--loader required (or use --remove)")
+                print(iap.install_script(pkg, a.loader, a.payload))
+            return 0
+
+    if a.cmd == "lsposed":
+        if a.ls_cmd == "status":
+            print(lsposed.status())
+            return 0
+        if a.ls_cmd == "modules":
+            print("\n".join(lsposed.modules()))
+            return 0
+        if a.ls_cmd == "scope":
+            print(lsposed.scope_remove(a.module, a.pkg) if a.remove else lsposed.scope_add(a.module, a.pkg))
+            return 0
+        if a.ls_cmd == "scope-db":
+            print(lsposed.scope_db(a.module, a.pkg, add=not a.remove, reboot=a.reboot))
+            return 0
+
+    if a.cmd == "mitm":
+        if a.mitm_cmd == "enable":
+            cfg = cfg_for(a.pkg)
+            pkg = cfg.get("package", a.pkg)
+            print(json.dumps(mitm.enable(pkg, cfg, a.host, a.port, a.dry_run), indent=1))
+            return 0
+        if a.mitm_cmd == "disable":
+            print(json.dumps(mitm.disable(), indent=1))
+            return 0
+        if a.mitm_cmd == "ca":
+            if a.unmount:
+                print(json.dumps(mitm.unmount_ca_system(), indent=1))
+            elif a.system:
+                print(json.dumps(mitm.install_ca_system(), indent=1))
+            else:
+                print(json.dumps(mitm.install_ca() if a.install else mitm.ca_info(), indent=1))
+            return 0
+
+    if a.cmd == "il2cpp":
+        cfg = cfg_for(a.pkg)
+        pkg = cfg.get("package", a.pkg)
+        apks = [Path(x) for x in a.apks.split(",") if x] if a.apks else None
+        print(json.dumps(il2cpp.dump(pkg, cfg, apks, a.force_pull), indent=1))
+        return 0
+
+    if a.cmd == "save":
+        info = save.sniff(a.path)
+        print(json.dumps(info, indent=1) if a.json else save.render(info))
+        return 0
+
+    if a.cmd == "evidence":
+        cfg = cfg_for(a.pkg)
+        print(evidence.capture(cfg.get("package", a.pkg), cfg, a.seconds, a.tag))
+        return 0
+
+    if a.cmd == "hook":
+        return hook.run(a.script, a.pkg, a.spawn, a.seconds, a.host)
+
+    if a.cmd == "recipe":
+        if a.rec_cmd == "list":
+            print("\n".join(recipe.listing()))
+            return 0
+        return recipe.run(a.name, a.target, a.dry_run)
+
+    if a.cmd == "version":
+        import subprocess
+
+        print(subprocess.run(["git", "-C", str(ROOT), "describe", "--always", "--dirty"],
+                             capture_output=True, text=True).stdout.strip() or "unknown")
+        return 0
+
+    if a.cmd == "cleanup":
+        print(json.dumps(mitm.disable(), indent=1))
+        try:
+            util.dev("kill -9 $(pidof .fs) 2>/dev/null; setenforce 1; getenforce", timeout=30)
+        except util.DopsError:
+            pass
+        print("cleanup done")
+        return 0
+
+    return 2
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except util.DopsError as e:
+        print(f"erro: {e}", file=sys.stderr)
+        raise SystemExit(1)
+    except KeyboardInterrupt:
+        raise SystemExit(130)

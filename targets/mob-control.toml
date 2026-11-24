@@ -1,0 +1,8 @@
+package = "com.vincentb.MobControl"
+save_paths = ["/sdcard/Android/data/{package}/files"]
+receipt_prefs = "/data/data/{package}/shared_prefs/fuck.iab.xml"
+
+[mitm]
+hosts = []
+match_path = ""
+patch = { status = 0 }

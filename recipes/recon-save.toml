@@ -1,0 +1,7 @@
+name = "recon-save"
+description = "Recon do pacote + backup antes de qualquer escrita"
+steps = [
+  ["recon", "{target}"],
+  ["backup", "{target}"],
+  ["evidence", "{target}", "--tag", "baseline"],
+]

@@ -1,0 +1,9 @@
+# Versões validadas em 2026-11 (host: Ubuntu, Python 3.13)
+python = ">=3.11"          # tomllib
+frida-python = "17.27.4"   # combina com frida-server 17.x no device
+mitmproxy = ">=10"         # mitmdump reverse mode
+frida-il2cpp-bridge = "0.14.0"   # node_modules do frida-agent
+unitypy = ">=1.20"         # extração de TextAssets/catálogos
+# device
+lsposed = "2.2.1"
+fkiab = "1.8.1"

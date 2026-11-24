@@ -1,0 +1,8 @@
+name = "iap-mitm"
+description = "Intercepta a validação de IAP do alvo e reporta o estado"
+steps = [
+  ["doctor"],
+  ["iap", "status", "{target}"],
+  ["mitm", "enable", "{target}"],
+  ["evidence", "{target}", "--tag", "mitm-enabled"],
+]

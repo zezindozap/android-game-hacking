@@ -1,0 +1,9 @@
+state/
+.venv/
+__pycache__/
+*.pyc
+*.tar.gz
+*.sha256
+*.log
+mitmproxy-ca*
+.env

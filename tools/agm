@@ -1,0 +1,286 @@
+#!/usr/bin/env python3
+"""agm - android game mod: scripted memory scan/edit over Frida (rooted device).
+
+Session model: a JSON state file keyed by target package, holding the last scan
+result set so refinement passes work across CLI invocations.
+
+  agm scan <value> [--type int32] [--package PKG] [--pid PID]
+  agm next <value> [--mode eq|gt|lt|changed|unchanged]
+  agm list [--max N] [--read]
+  agm write <index|addr> <value>
+  agm freeze <index|addr> <value>       (re-apply loop in this process)
+  agm reset
+"""
+import argparse
+import json
+import os
+import struct
+import sys
+import time
+
+import frida
+
+HOST = os.environ.get("AGM_HOST", "127.0.0.1:27042")
+STATE_DIR = os.environ.get("AGM_STATE", os.path.expanduser("~/.local/state/droid-arsenal/agm"))
+
+TYPES = {"int8": 1, "int16": 2, "int32": 4, "int64": 8, "float": 4, "double": 8}
+
+AGENT = r"""
+const TYPES = {int8:1,int16:2,int32:4,int64:8,float:4,double:8};
+
+function ranges() {
+  return Process.enumerateRanges('rw-').filter(r => {
+    if (r.size < 4096 || r.size > 2 * 1024 * 1024 * 1024) return false;
+    if (!r.file) return true;
+    // device/graphics mappings block or crash on large reads
+    return !/^\/(dev|dmabuf|memfd|system\/lib64\/libGLES|system\/vendor\/lib64\/libGLES)/.test(r.file);
+  });
+}
+
+function patternFor(value, type) {
+  const buf = new ArrayBuffer(8);
+  const dv = new DataView(buf);
+  switch (type) {
+    case 'int8': dv.setInt8(0, value); return hexEncode(buf, 1);
+    case 'int16': dv.setInt16(0, value, true); return hexEncode(buf, 2);
+    case 'int32': dv.setInt32(0, value, true); return hexEncode(buf, 4);
+    case 'int64': dv.setBigInt64(0, BigInt(value), true); return hexEncode(buf, 8);
+    case 'float': dv.setFloat32(0, value, true); return hexEncode(buf, 4);
+    case 'double': dv.setFloat64(0, value, true); return hexEncode(buf, 8);
+  }
+}
+
+function hexEncode(buf, n) {
+  const b = new Uint8Array(buf, 0, n);
+  let s = '';
+  for (let i = 0; i < n; i++) s += (b[i] < 16 ? '0' : '') + b[i].toString(16);
+  return s;
+}
+
+function readAt(addr, type) {
+  try {
+    switch (type) {
+      case 'int8': return addr.readS8();
+      case 'int16': return addr.readS16();
+      case 'int32': return addr.readS32();
+      case 'int64': return addr.readS64().valueOf();
+      case 'float': return addr.readFloat();
+      case 'double': return addr.readDouble();
+    }
+  } catch (e) { return null; }
+  return null;
+}
+
+function writeAt(addr, type, value) {
+  try {
+    switch (type) {
+      case 'int8': addr.writeS8(value); break;
+      case 'int16': addr.writeS16(value); break;
+      case 'int32': addr.writeS32(value); break;
+      case 'int64': addr.writeS64(value); break;
+      case 'float': addr.writeFloat(value); break;
+      case 'double': addr.writeDouble(value); break;
+    }
+    return true;
+  } catch (e) { return false; }
+}
+
+function scan(value, type, limit) {
+  const pattern = patternFor(value, type);
+  const out = [];
+  const CHUNK = 32 * 1024 * 1024;
+  for (const r of ranges()) {
+    const touches = r.size <= CHUNK ? [r] :
+      Array.from({ length: Math.ceil(r.size / CHUNK) }, (_, i) => ({
+        base: r.base.add(i * CHUNK), size: Math.min(CHUNK, r.size - i * CHUNK),
+      }));
+    for (const piece of touches) {
+      let found;
+      try { found = Memory.scanSync(piece.base, piece.size, pattern); } catch (e) { found = []; }
+      for (const m of found) {
+        out.push(m.address);
+        if (out.length >= limit) return out.map(a => a.toString());
+      }
+    }
+  }
+  return out.map(a => a.toString());
+}
+
+rpc.exports = {
+  ranges() { return ranges().map(r => [r.base.toString(), r.size]); },
+  scan: scan,
+  read(addr, type) { const v = readAt(ptr(addr), type); return v === null ? null : (typeof v === 'number' ? v : String(v)); },
+  readMany(addrs, type) { return addrs.map(a => { const v = readAt(ptr(a), type); return v === null ? null : v; }); },
+  write(addr, type, value) { return writeAt(ptr(addr), type, value); },
+  writeMany(addrs, type, value) { return addrs.map(a => writeAt(ptr(a), type, value)); },
+};
+"""
+
+
+def current_key(explicit):
+    if explicit:
+        return explicit
+    try:
+        with open(os.path.join(STATE_DIR, "_current")) as f:
+            return f.read().strip() or "default"
+    except Exception:
+        return "default"
+
+
+def state_path(key):
+    os.makedirs(STATE_DIR, exist_ok=True)
+    return os.path.join(STATE_DIR, key.replace("/", "_") + ".json")
+
+
+def load_state(key):
+    try:
+        with open(state_path(key)) as f:
+            return json.load(f)
+    except Exception:
+        return {"pid": None, "package": None, "type": None, "value": None, "addrs": []}
+
+
+def save_state(key, st):
+    os.makedirs(STATE_DIR, exist_ok=True)
+    with open(state_path(key), "w") as f:
+        json.dump(st, f)
+    with open(os.path.join(STATE_DIR, "_current"), "w") as f:
+        f.write(key)
+
+
+def pick_target(args, st):
+    dev = frida.get_device_manager().add_remote_device(HOST)
+    if args.pid:
+        return dev, args.pid
+    if args.package:
+        for p in dev.enumerate_processes():
+            if p.name == args.package:
+                return dev, p.pid
+        for a in dev.enumerate_applications():
+            if a.identifier == args.package:
+                if a.pid:
+                    return dev, a.pid
+                pid = dev.spawn([a.identifier])
+                time.sleep(1.0)
+                return dev, pid
+        sys.exit(f"agm: package {args.package} not running and not launchable")
+    if st.get("pid"):
+        return dev, st["pid"]
+    sys.exit("agm: no target (--pid or --package or previous scan)")
+
+
+def attach(args, st):
+    key = args.package or st.get("package") or str(args.pid)
+    st["package"] = args.package or st.get("package")
+    dev, pid = pick_target(args, st)
+    st["pid"] = pid
+    session = dev.attach(pid)
+    script = session.create_script(AGENT)
+    script.load()
+    return script.exports_sync, st, pid
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("cmd", choices=["scan", "next", "list", "write", "freeze", "reset", "ranges", "read"])
+    ap.add_argument("args", nargs="*")
+    ap.add_argument("--type", default=None, choices=list(TYPES))
+    ap.add_argument("--package")
+    ap.add_argument("--pid", type=int)
+    ap.add_argument("--mode", default="eq", choices=["eq", "gt", "lt", "changed", "unchanged"])
+    ap.add_argument("--max", type=int, default=5000)
+    a = ap.parse_args()
+
+    key = current_key(a.package); st = load_state(key)
+    if a.cmd == "reset":
+        st = {"pid": None, "package": key, "type": None, "value": None, "addrs": []}
+        save_state(key, st)
+        print("reset")
+        return
+
+    if a.cmd == "ranges":
+        ex, st, pid = attach(a, st)
+        save_state(key, st)
+        print(f"pid={pid} rw-ranges={len(ex.ranges())}")
+        return
+
+    typ = a.type or st.get("type") or "int32"
+
+    if a.cmd == "scan":
+        val = float(a.args[0]) if typ in ("float", "double") else int(a.args[0], 0)
+        ex, st, pid = attach(a, st)
+        addrs = ex.scan(val, typ, a.max)
+        st.update(type=typ, value=val, addrs=addrs, pid=pid)
+        save_state(key, st)
+        print(f"pid={pid} type={typ} value={val} hits={len(addrs)}{' (capped)' if len(addrs) >= a.max else ''}")
+        for i, ad in enumerate(addrs[:20]):
+            print(f"  [{i}] {ad}")
+        return
+
+    if a.cmd == "next":
+        val = float(a.args[0]) if typ in ("float", "double") else int(a.args[0], 0)
+        addrs = st.get("addrs") or []
+        if not addrs:
+            sys.exit("agm: empty result set; run scan first")
+        ex, st, pid = attach(a, st)
+        vals = ex.readMany(addrs, typ)
+        keep = []
+        for ad, cur in zip(addrs, vals):
+            if cur is None:
+                continue
+            ok = {
+                "eq": cur == val, "gt": cur > val, "lt": cur < val,
+                "changed": cur != st.get("value"), "unchanged": cur == st.get("value"),
+            }[a.mode]
+            if ok:
+                keep.append(ad)
+        st.update(value=val, addrs=keep, type=typ, pid=pid)
+        save_state(key, st)
+        print(f"mode={a.mode} value={val} remaining={len(keep)}/{len(addrs)}")
+        for i, ad in enumerate(keep[:20]):
+            print(f"  [{i}] {ad}")
+        return
+
+    if a.cmd == "list":
+        addrs = st.get("addrs") or []
+        print(f"pid={st.get('pid')} type={st.get('type')} value={st.get('value')} count={len(addrs)}")
+        if a.args and a.args[0] == "--read" or getattr(a, "read", False):
+            pass
+        for i, ad in enumerate(addrs[: a.max]):
+            print(f"  [{i}] {ad}")
+        return
+
+    if a.cmd == "read":
+        addrs = [x.strip() for x in a.args] or (st.get("addrs") or [])[: a.max]
+        ex, st, pid = attach(a, st)
+        save_state(key, st)
+        for ad, v in zip(addrs, ex.readMany(addrs, typ)):
+            print(f"{ad} = {v}")
+        return
+
+    if a.cmd in ("write", "freeze"):
+        target, val = a.args[0], a.args[1]
+        addrs = st.get("addrs") or []
+        if target.isdigit() and int(target) < len(addrs):
+            targets = [addrs[int(target)]]
+        elif target.startswith("all"):
+            targets = addrs
+        else:
+            targets = [target]
+        v = float(val) if typ in ("float", "double") else int(val, 0)
+        ex, st, pid = attach(a, st)
+        save_state(key, st)
+        res = ex.writeMany(targets, typ, v)
+        print(f"write {typ}={v} -> {sum(res)}/{len(targets)} ok")
+        if a.cmd == "freeze":
+            print("freezing (Ctrl-C to stop)")
+            try:
+                while True:
+                    ex.writeMany(targets, typ, v)
+                    time.sleep(0.25)
+            except KeyboardInterrupt:
+                print("unfrozen")
+
+
+if __name__ == "__main__":
+    main()

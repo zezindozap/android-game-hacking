@@ -1,0 +1,8 @@
+package = "com.ninjakiwi.bloonsblitz"
+save_paths = ["/sdcard/Android/data/{package}/files"]
+receipt_prefs = "/data/data/{package}/shared_prefs/fuck.iab.xml"
+
+[mitm]
+hosts = ["us-central1-inapppurchasevalidation-c062c.cloudfunctions.net"]
+match_path = "/"
+patch = { result = 1 }

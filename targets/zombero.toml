@@ -1,0 +1,13 @@
+package = "com.aldagames.zombero.bullet.hell"
+save_paths = ["/sdcard/Android/data/{package}/files/save", "/sdcard/Android/data/{package}/files"]
+receipt_prefs = "/data/data/{package}/shared_prefs/fuck.iab.xml"
+
+# IAP server-authoritative (CServerHits.ValidateShopPurchaseHit -> EHit 10/11),
+# protocolo binário próprio (CClientSocket/CInPacket); MITM HTTPS não se aplica.
+# Status 2026-11-24: bloqueado — hook da validação chega ao callback (após preencher
+# remainingAds/modificatedQuests), mas socket disposed/ACTK instabiliza; próxima rota =
+# hook do dispatch (CIncomingDataPreparer.DecodeIncomingHit). Runbook: server-validated-iap.md.
+[mitm]
+hosts = []
+match_path = ""
+patch = {}

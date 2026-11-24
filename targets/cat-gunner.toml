@@ -1,0 +1,10 @@
+package = "com.Chodun.CatGunner"
+# uid: preencher com `dops recon` se o lookup falhar
+save_paths = ["/sdcard/Android/data/{package}/files/saves"]
+receipt_prefs = "/data/data/{package}/shared_prefs/fuck.iab.xml"
+
+# MITM bloqueado neste alvo: cliente recusa CA de sistema (store própria/pinning). Só codec/patch.
+[mitm]
+hosts = ["us-central1-inapppurchasevalidation-c062c.cloudfunctions.net"]
+match_path = "/verifyInAppPurchaseGoogleYooSud"
+patch = { result = 1 }

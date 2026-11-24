@@ -1,0 +1,8 @@
+name = "iap-fkiab"
+description = "Escopo + estado do FakeBinder e recibos fake do alvo"
+steps = [
+  ["doctor"],
+  ["iap", "status", "{target}"],
+  ["iap", "scope", "{target}"],
+  ["evidence", "{target}", "--tag", "fkiab"],
+]
